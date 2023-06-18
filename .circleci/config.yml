@@ -1,0 +1,82 @@
+version: 2
+jobs:
+
+  validate:
+    machine:
+      image: ubuntu-2004:202201-02 # pins image to specific version
+
+    working_directory: ~/repo
+
+    steps:
+      - run:
+          name: Install dojo
+          command: |
+            DOJO_VERSION=0.6.2
+            wget -O dojo https://github.com/kudulab/dojo/releases/download/${DOJO_VERSION}/dojo_linux_amd64
+            chmod +x dojo
+            sudo mv dojo /usr/local/bin
+
+      - checkout
+
+      - run:
+          name: Create second checkout
+          command: |
+            shopt -s extglob
+            mkdir -p second-infra
+            cp -r !(second-infra) second-infra
+
+      - run:
+          name: Create stacks
+          command: |
+            read -r AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN <<< \
+              $(aws sts assume-role-with-web-identity \
+               --role-arn ${AWS_OIDC_ROLE} \
+               --role-session-name "CircleCI-${CIRCLE_WORKFLOW_ID}-${CIRCLE_JOB}" \
+               --web-identity-token $CIRCLE_OIDC_TOKEN \
+               --duration-seconds 3600 \
+               --query 'Credentials.[AccessKeyId,SecretAccessKey,SessionToken]' \
+               --output text)
+
+            export AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN
+
+            export CODE_PREFIX=user1-$(date | md5sum | cut -c -14)
+            eval $(./recops.sh setup_user)
+            make deploy_interview
+
+            export CODE_PREFIX=user2-$(date | md5sum | cut -c -14)
+            cd second-infra
+            eval $(./recops.sh setup_user)
+            make deploy_interview
+
+
+      - run:
+          name: Destroy stacks
+          command: |
+            read -r AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN <<< \
+              $(aws sts assume-role-with-web-identity \
+               --role-arn ${AWS_OIDC_ROLE} \
+               --role-session-name "CircleCI-${CIRCLE_WORKFLOW_ID}-${CIRCLE_JOB}" \
+               --web-identity-token $CIRCLE_OIDC_TOKEN \
+               --duration-seconds 3600 \
+               --query 'Credentials.[AccessKeyId,SecretAccessKey,SessionToken]' \
+               --output text)
+
+            export AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN
+
+            make destroy_interview
+
+            cd second-infra
+            make destroy_interview
+          when: always
+
+
+workflows:
+  version: 2
+
+  # Ensures that code is in working state - it can be deployed and destroyed cleanly
+  # Infrastructure is deployed in the UK account
+  infra-hiring-validate:
+    jobs:
+      - validate:
+          context:
+            - oidc-context
